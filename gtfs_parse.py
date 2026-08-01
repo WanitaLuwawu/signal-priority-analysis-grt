@@ -2,12 +2,10 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
-from google.transit import gtfs_realtime_pb2
 
 # File Paths
 GTFS_DIR = "data/gtfs"
 REALTIME_DIR = "data/realtime"
-PB_FILE = os.path.join(REALTIME_DIR, "trip_updates.pb")
 OUTPUT_CSV = "data/peak_buses_with_delays.csv"
 
 # 1. Parse static GTFS tables
@@ -60,102 +58,50 @@ static_summary = buses_per_stop.merge(
 )
 print(f"  ✅ Parsed {len(static_summary):,} static bus stops across peak periods.")
 
-# 2. Parse GTFS real-time timestamps
-print("\n--- 2. Parsing Realtime Timestamps & Calculating Delays ---")
+# 2. Parse accumulated delay records from GitHub
+print("\n--- 2. Loading Accumulated Delay Records ---")
 
+DELAY_RECORDS_CSV = "data/realtime/delay_records.csv"
 
-def decode_rt_timestamps(pb_path):
-    if not os.path.exists(pb_path):
-        print(f"  ⚠️ Warning: File not found at '{pb_path}'.")
-        return pd.DataFrame(columns=["trip_id", "stop_id", "stop_sequence", "rt_arrival_time"])
+if os.path.exists(DELAY_RECORDS_CSV):
+    delay_records = pd.read_csv(DELAY_RECORDS_CSV, dtype={"stop_id": str})
+    delay_records["delay_sec"] = delay_records["delay_sec"].astype(float)
 
-    feed = gtfs_realtime_pb2.FeedMessage()
-    with open(pb_path, "rb") as f:
-        feed.ParseFromString(f.read())
+    # Show coverage summary
+    snapshot_count = delay_records["snapshot_time"].nunique()
+    print(f"  ✅ Loaded {len(delay_records):,} delay records")
+    print(f"  ✅ Across {snapshot_count} snapshots")
+    print(f"  Date range: {delay_records['snapshot_time'].min()} → "
+          f"{delay_records['snapshot_time'].max()}")
 
-    records = []
-    for entity in feed.entity:
-        if entity.HasField("trip_update"):
-            tu = entity.trip_update
-            trip_id = str(tu.trip.trip_id)
+    # Filter outliers
+    valid_delays = delay_records[
+        (delay_records["delay_sec"] >= -300) &
+        (delay_records["delay_sec"] <= 1800)
+    ]
 
-            for st in tu.stop_time_update:
-                rt_time = None
-                if st.HasField("arrival") and st.arrival.HasField("time"):
-                    rt_time = st.arrival.time
-                elif st.HasField("departure") and st.departure.HasField("time"):
-                    rt_time = st.departure.time
-
-                if rt_time is not None:
-                    records.append({
-                        "trip_id": trip_id,
-                        "stop_id": str(st.stop_id).strip(),
-                        "stop_sequence": str(st.stop_sequence),
-                        "rt_arrival_time": rt_time
-                    })
-
-    return pd.DataFrame(records)
-
-
-rt_df = decode_rt_timestamps(PB_FILE)
-print(f"  ✅ Extracted {len(rt_df):,} real-time predictions from 401 active trip updates.")
-
-if not rt_df.empty:
-    # Merge real-time arrival timestamps with static schedule
-    merged_rt = rt_df.merge(
-        stop_times[["trip_id", "stop_id", "arrival_time"]],
-        on=["trip_id", "stop_id"],
-        how="inner"
-    )
-
-    # Convert static arrival_time ("HH:MM:SS") + today's date into Unix timestamp
-    today_date_str = datetime.now().strftime("%Y-%m-%d")
-
-
-    def convert_to_unix(row):
-        try:
-            time_str = row["arrival_time"].strip()
-            hours, minutes, seconds = map(int, time_str.split(":"))
-
-            # Handle late-night GTFS times (e.g. 25:10:00 -> next day 01:10:00)
-            day_offset = hours // 24
-            hours = hours % 24
-
-            dt = datetime.strptime(today_date_str, "%Y-%m-%d")
-            dt = dt.replace(hour=hours, minute=minutes, second=seconds)
-
-            # Add day offset if arrival hour was >= 24
-            if day_offset > 0:
-                dt = dt + pd.Timedelta(days=day_offset)
-
-            # Assume local time offset (EDT = UTC-4)
-            timestamp_sec = int(dt.replace(tzinfo=timezone.utc).timestamp()) + (4 * 3600)
-            return timestamp_sec
-        except Exception:
-            return None
-
-
-    merged_rt["sched_unix"] = merged_rt.apply(convert_to_unix, axis=1)
-
-    # Delay = Real-time Unix Timestamp - Scheduled Unix Timestamp (in seconds)
-    merged_rt["delay_sec"] = merged_rt["rt_arrival_time"] - merged_rt["sched_unix"]
-
-    # Filter extreme anomalies/outliers (keep delays between -5 mins and +30 mins)
-    valid_delays = merged_rt[(merged_rt["delay_sec"] >= -300) & (merged_rt["delay_sec"] <= 1800)]
-
-    # Aggregate delays per stop ID
+    # Aggregate across ALL snapshots per stop
     delay_summary = valid_delays.groupby("stop_id").agg(
         avg_snapshot_delay_sec=("delay_sec", "mean"),
         max_snapshot_delay_sec=("delay_sec", "max"),
         sample_count=("delay_sec", "count")
     ).reset_index()
-else:
-    delay_summary = pd.DataFrame(
-        columns=["stop_id", "avg_snapshot_delay_sec", "max_snapshot_delay_sec", "sample_count"])
 
-# ==============================================================================
-# SECTION 3: COMBINE STATIC + REALTIME & SAVE
-# ==============================================================================
+    delay_summary["avg_snapshot_delay_sec"] = \
+        delay_summary["avg_snapshot_delay_sec"].round(1)
+    delay_summary["max_snapshot_delay_sec"] = \
+        delay_summary["max_snapshot_delay_sec"].round(1)
+
+    print(f"  Stops with delay data: {len(delay_summary):,}")
+
+else:
+    print(f"  ⚠️ No delay records found at '{DELAY_RECORDS_CSV}'")
+    print(f"     Run the GitHub Action first to collect data.")
+    delay_summary = pd.DataFrame(
+        columns=["stop_id", "avg_snapshot_delay_sec",
+                 "max_snapshot_delay_sec", "sample_count"])
+
+# 3. COMBINE STATIC + REALTIME & SAVE
 print("\n--- 3. Merging & Exporting ---")
 
 final_df = static_summary.merge(delay_summary, on="stop_id", how="left")
