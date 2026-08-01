@@ -31,15 +31,11 @@ jobs:
         run: |
           pip install requests gtfs-realtime-bindings pandas pytz
 
-      # 4. Download GTFS static feed
-      - name: Download static GTFS
-        run: python gtfs_download.py
-
-      # 5. Run the collector and parser
+      # 4. Run the collector and parser
       - name: Collect and parse realtime feed
         run: python collect_and_parse_rt.py
 
-      # 6. Commit the updated CSV back to the repo
+      # 5. Commit the updated CSV back to the repo
       - name: Commit delay records
         run: |
           git config user.name  "github-actions[bot]"
