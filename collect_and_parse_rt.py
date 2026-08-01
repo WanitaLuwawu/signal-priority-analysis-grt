@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
 from google.transit import gtfs_realtime_pb2
+import pytz
 
 # 1. Fetch .pb
 URL = "https://webapps.regionofwaterloo.ca/api/grt-routes/api/tripupdates/1"
@@ -54,7 +55,6 @@ print("Parsing protobuf feed...")
 
 stop_times = pd.read_csv(f"{GTFS_DIR}/stop_times.txt", dtype=str)
 
-import pytz
 eastern = pytz.timezone("America/Toronto")
 today_str = datetime.now(eastern).strftime("%Y-%m-%d")
 
