@@ -31,14 +31,34 @@ jobs:
         run: |
           pip install requests gtfs-realtime-bindings pandas pytz
 
-      # 4. Download GTFS static feed (needed for scheduled times)
+      # 4. Download GTFS static feed
       - name: Download static GTFS
         run: |
           mkdir -p data/gtfs
-          curl -L "http://www.regionofwaterloo.ca/opendatadownloads/GRT_GTFS.zip" \
-               -o GRT_GTFS.zip
-          unzip -o GRT_GTFS.zip -d data/gtfs
-          echo "✅ GTFS extracted"
+          pip install requests
+          python - <<'EOF'
+          import requests, zipfile, io, ssl
+          from requests.adapters import HTTPAdapter
+
+          class WeakDHAdapter(HTTPAdapter):
+              def init_poolmanager(self, *args, **kwargs):
+                  ctx = ssl.create_default_context()
+                  ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+                  kwargs["ssl_context"] = ctx
+                  super().init_poolmanager(*args, **kwargs)
+
+          session = requests.Session()
+          session.mount("https://", WeakDHAdapter())
+
+          r = session.get(
+              "https://webapps.regionofwaterloo.ca/api/grt-routes/api/staticfeeds/1",
+              timeout=30
+          )
+          r.raise_for_status()
+          with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+              z.extractall("data/gtfs")
+          print(f"✅ Extracted {len(z.namelist())} files")
+          EOF
 
       # 5. Run the collector and parser
       - name: Collect and parse realtime feed
